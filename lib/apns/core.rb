@@ -3,23 +3,65 @@ module APNS
   require 'openssl'
   require 'json'
 
-  @host = 'gateway.sandbox.push.apple.com'
-  @port = 2195
-  # openssl pkcs12 -in mycert.p12 -out client-cert.pem -nodes -clcerts
-  @pem = nil # this should be the path of the pem file not the contentes
-  @pass = nil
+  class Application
+    attr_accessor :host, :port, :ssl_context
 
-  class << self
-    attr_accessor :host, :pem, :port, :pass
+    def initialize(sandbox=true, port=2195)
+      @host = sandbox ? 'gateway.sandbox.push.apple.com' : 'gateway.push.apple.com'
+      @port = port
+    end
+
+    def set_cert(pem_path, pass)
+      raise "The path to your pem file is not set. (APNS.pem = /path/to/cert.pem)" unless pem_path
+      raise "The path to your pem file does not exist!" unless File.exist?(pem_path)
+
+      @ssl_context      = OpenSSL::SSL::SSLContext.new
+      @ssl_context.cert = OpenSSL::X509::Certificate.new(File.read(pem_path))
+      @ssl_context.key  = OpenSSL::PKey::RSA.new(File.read(pem_path), pass)
+    end
   end
 
-  def self.send_notification(device_token, message)
+  @applications = {:default => Application.new}
+  @default_pem = nil
+  @default_pass = nil
+
+  def self.host=(host)
+    @applications[:default].host = host
+  end
+
+  def self.port=(port)
+    @applications[:default].port = port
+  end
+
+  def self.pem=(pem)
+    @default_pem = pem
+    @applications[:default].set_cert(@default_pem, @default_pass) rescue
+    pem
+  end
+
+  def self.pass=(pass)
+    @default_pass = pass
+    @applications[:default].set_cert(@default_pem, @default_pass) rescue
+    pass
+  end
+
+  def self.add_application(app_id, pem_path, pass=nil, sandbox=false)
+    app = Application.new(sandbox)
+    app.set_cert(pem_path, pass)
+    @applications[app_id] = app
+  end
+
+  def self.has_application?(app_id)
+    @applications.include?(app_id)
+  end
+
+  def self.send_notification(device_token, message, app_id=:default)
     n = APNS::Notification.new(device_token, message)
-    self.send_notifications([n])
+    self.send_notifications([n], app_id)
   end
 
-  def self.send_notifications(notifications)
-    sock, ssl = self.open_connection
+  def self.send_notifications(notifications, app_id=:default)
+    sock, ssl = self.open_connection(app_id)
 
     packed_nofications = self.packed_nofications(notifications)
 
@@ -45,8 +87,8 @@ module APNS
     bytes
   end
 
-  def self.feedback
-    sock, ssl = self.feedback_connection
+  def self.feedback(app_id=:default)
+    sock, ssl = self.feedback_connection(app_id)
 
     apns_feedback = []
 
@@ -63,30 +105,21 @@ module APNS
 
   protected
 
-  def self.open_connection
-    raise "The path to your pem file is not set. (APNS.pem = /path/to/cert.pem)" unless self.pem
-    raise "The path to your pem file does not exist!" unless File.exist?(self.pem)
-
-    context      = OpenSSL::SSL::SSLContext.new
-    context.cert = OpenSSL::X509::Certificate.new(File.read(self.pem))
-    context.key  = OpenSSL::PKey::RSA.new(File.read(self.pem), self.pass)
-
-    sock         = TCPSocket.new(self.host, self.port)
+  def self.open_connection(app_id)
+    application  = @applications[app_id]
+    context      = application.ssl_context
+    sock         = TCPSocket.new(application.host, application.port)
     ssl          = OpenSSL::SSL::SSLSocket.new(sock,context)
     ssl.connect
 
     return sock, ssl
   end
 
-  def self.feedback_connection
-    raise "The path to your pem file is not set. (APNS.pem = /path/to/cert.pem)" unless self.pem
-    raise "The path to your pem file does not exist!" unless File.exist?(self.pem)
+  def self.feedback_connection(app_id)
+    application  = @applications[app_id]
+    context      = application.ssl_context
 
-    context      = OpenSSL::SSL::SSLContext.new
-    context.cert = OpenSSL::X509::Certificate.new(File.read(self.pem))
-    context.key  = OpenSSL::PKey::RSA.new(File.read(self.pem), self.pass)
-
-    fhost = self.host.gsub('gateway','feedback')
+    fhost = application.host.gsub('gateway','feedback')
     puts fhost
 
     sock         = TCPSocket.new(fhost, 2196)
